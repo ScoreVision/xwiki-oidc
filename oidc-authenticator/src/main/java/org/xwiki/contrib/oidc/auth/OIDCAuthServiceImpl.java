@@ -36,6 +36,7 @@ import org.slf4j.LoggerFactory;
 import org.xwiki.container.servlet.HttpServletUtils;
 import org.xwiki.container.servlet.filters.SavedRequestManager;
 import org.xwiki.contrib.oidc.auth.internal.Endpoint;
+import org.xwiki.contrib.oidc.auth.internal.OIDCBearerTokenValidator;
 import org.xwiki.contrib.oidc.auth.internal.OIDCClientConfiguration;
 import org.xwiki.contrib.oidc.auth.internal.OIDCUserManager;
 import org.xwiki.contrib.oidc.auth.internal.endpoint.CallbackOIDCEndpoint;
@@ -78,9 +79,22 @@ public class OIDCAuthServiceImpl extends XWikiAuthServiceImpl
 
     private ScriptContextManager scriptContextManager = Utils.getComponent(ScriptContextManager.class);
 
+    private OIDCBearerTokenValidator bearerValidator = Utils.getComponent(OIDCBearerTokenValidator.class);
+
     @Override
     public XWikiUser checkAuth(XWikiContext context) throws XWikiException
     {
+        // Check for a bearer token in the Authorization header (REST API requests)
+        XWikiRequest request = context.getRequest();
+        String authorization = request.getHeader("Authorization");
+        if (authorization != null && authorization.startsWith("Bearer ")) {
+            XWikiUser bearerUser =
+                this.bearerValidator.authenticate(authorization.substring(7).trim(), context);
+            if (bearerUser != null) {
+                return bearerUser;
+            }
+        }
+
         LOGGER.debug("Checking if there is already a user in the session");
 
         // Check if there is already a user in the session, take care of logout, etc.

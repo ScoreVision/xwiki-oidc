@@ -418,6 +418,27 @@ public class OIDCClientConfiguration extends OIDCConfiguration
      */
     public static final String PROP_SESSION_CODE_VERIFIER = "oidc.codeverifier";
 
+    /**
+     * Enable bearer token authentication on REST API requests.
+     *
+     * @since 2.20.4
+     */
+    public static final String PROP_BEARER_ENABLED = OIDCConfiguration.PREFIX_PROP + "bearer.enabled";
+
+    /**
+     * Expected issuer for bearer tokens. Defaults to the configured OIDC provider.
+     *
+     * @since 2.20.4
+     */
+    public static final String PROP_BEARER_ISSUER = OIDCConfiguration.PREFIX_PROP + "bearer.issuer";
+
+    /**
+     * JWT claim to use for user identity when authenticating via bearer token.
+     *
+     * @since 2.20.4
+     */
+    public static final String PROP_BEARER_USERCLAIM = OIDCConfiguration.PREFIX_PROP + "bearer.userclaim";
+
     @Inject
     private InstanceIdManager instance;
 
@@ -1719,5 +1740,47 @@ public class OIDCClientConfiguration extends OIDCConfiguration
         }
 
         return null;
+    }
+
+    // -- Bearer token authentication properties --
+
+    /**
+     * @return true if bearer token authentication is enabled for REST API requests
+     * @since 2.20.4
+     */
+    public boolean isBearerTokenEnabled()
+    {
+        Boolean enabled = getProperty(PROP_BEARER_ENABLED, Boolean.class);
+
+        return enabled != null && enabled;
+    }
+
+    /**
+     * @return the expected issuer for bearer tokens, or null to derive from provider
+     * @since 2.20.4
+     */
+    public String getBearerIssuer()
+    {
+        String issuer = getProperty(PROP_BEARER_ISSUER, String.class);
+
+        if (issuer != null) {
+            return issuer;
+        }
+
+        // Fall back to the configured OIDC provider issuer
+        Issuer oidcIssuer = getIssuer();
+
+        return oidcIssuer != null ? oidcIssuer.getValue() : null;
+    }
+
+    /**
+     * @return the JWT claim to use for user identity in bearer tokens
+     * @since 2.20.4
+     */
+    public String getBearerUserClaim()
+    {
+        String claim = getProperty(PROP_BEARER_USERCLAIM, String.class);
+
+        return claim != null ? claim : "preferred_username";
     }
 }

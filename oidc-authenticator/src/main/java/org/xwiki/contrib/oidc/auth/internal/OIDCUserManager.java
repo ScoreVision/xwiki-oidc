@@ -994,4 +994,58 @@ public class OIDCUserManager
         // Redirect to the provider
         this.manager.redirect(logoutRequest.toURI().toString(), true);
     }
+
+    /**
+     * Resolve an XWiki user from a bearer token identity claim (email, UPN, etc.).
+     *
+     * Searches in order:
+     * 1. XWiki.XWikiUsers email field
+     * 2. XWiki.OIDC.UserClass subject field
+     * 3. Direct document name match (XWiki.&lt;identity&gt;)
+     *
+     * @param identity the user identity from the JWT claim
+     * @param context the XWiki context
+     * @return the XWikiUser, or null if no match
+     * @since 2.20.4
+     */
+    public com.xpn.xwiki.user.api.XWikiUser resolveUserByIdentity(String identity, XWikiContext context)
+    {
+        // Strategy 1: search by email in XWikiUsers
+        try {
+            XWikiDocument userDoc = this.store.searchDocumentByEmail(identity);
+            if (userDoc != null) {
+                this.logger.debug("Bearer user resolved by email: [{}]", userDoc.getDocumentReference());
+
+                return new com.xpn.xwiki.user.api.XWikiUser(userDoc.getDocumentReference());
+            }
+        } catch (Exception e) {
+            this.logger.debug("Bearer user email search failed: [{}]", e.getMessage());
+        }
+
+        // Strategy 2: search by OIDC subject
+        try {
+            XWikiDocument userDoc = this.store.searchDocument(null, identity);
+            if (userDoc != null) {
+                this.logger.debug("Bearer user resolved by OIDC subject: [{}]", userDoc.getDocumentReference());
+
+                return new com.xpn.xwiki.user.api.XWikiUser(userDoc.getDocumentReference());
+            }
+        } catch (Exception e) {
+            this.logger.debug("Bearer user OIDC subject search failed: [{}]", e.getMessage());
+        }
+
+        // Strategy 3: direct document name match
+        DocumentReference directRef = new DocumentReference(context.getWikiId(), "XWiki", identity);
+        try {
+            if (context.getWiki().exists(directRef, context)) {
+                this.logger.debug("Bearer user resolved by direct name: [{}]", directRef);
+
+                return new com.xpn.xwiki.user.api.XWikiUser(directRef);
+            }
+        } catch (Exception e) {
+            this.logger.debug("Bearer user direct lookup failed: [{}]", e.getMessage());
+        }
+
+        return null;
+    }
 }

@@ -54,4 +54,18 @@ public interface OIDCUserStore
      * @throws QueryException when failing to search for the document
      */
     XWikiDocument searchDocument(String issuer, String subject) throws XWikiException, QueryException;
+
+    /**
+     * Search for an XWiki user by email address.
+     *
+     * @param email the email address to search for
+     * @return the document of the user profile, or null if not found
+     * @throws XWikiException when failing to get the document
+     * @throws QueryException when failing to search for the document
+     * @since 2.20.4
+     */
+    default XWikiDocument searchDocumentByEmail(String email) throws XWikiException, QueryException
+    {
+        return null;
+    }
 }

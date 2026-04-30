@@ -109,4 +109,31 @@ public class DefaultOIDCUserStore implements OIDCUserStore
 
         return userDocument;
     }
+
+    @Override
+    public XWikiDocument searchDocumentByEmail(String email) throws XWikiException, QueryException
+    {
+        Query query = this.queries.createQuery(
+            "from doc.object(XWiki.XWikiUsers) as user where user.email = :email", Query.XWQL);
+
+        query.bindValue("email", email);
+        query.setLimit(1);
+
+        List<String> documents = query.execute();
+
+        if (documents.isEmpty()) {
+            return null;
+        }
+
+        XWikiContext xcontext = this.xcontextProvider.get();
+
+        DocumentReference userReference = this.resolver.resolve(documents.get(0));
+        XWikiDocument userDocument = xcontext.getWiki().getDocument(userReference, xcontext);
+
+        if (userDocument.isNew()) {
+            return null;
+        }
+
+        return userDocument;
+    }
 }
