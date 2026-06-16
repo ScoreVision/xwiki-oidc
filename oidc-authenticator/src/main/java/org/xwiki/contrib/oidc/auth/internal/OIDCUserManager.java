@@ -378,6 +378,19 @@ public class OIDCUserManager
             userObject.set("first_name", userInfo.getGivenName(), xcontext);
         }
 
+        // Set the page title to the user's display name so the profile
+        // shows a readable name instead of the opaque OIDC subject ID
+        String displayName = userInfo.getName();
+        if (displayName == null && userInfo.getGivenName() != null) {
+            displayName = userInfo.getGivenName();
+            if (userInfo.getFamilyName() != null) {
+                displayName += " " + userInfo.getFamilyName();
+            }
+        }
+        if (displayName != null && !displayName.isEmpty()) {
+            userDocument.setTitle(displayName);
+        }
+
         // Phone
         if (userInfo.getPhoneNumber() != null) {
             userObject.set("phone", userInfo.getPhoneNumber(), xcontext);
