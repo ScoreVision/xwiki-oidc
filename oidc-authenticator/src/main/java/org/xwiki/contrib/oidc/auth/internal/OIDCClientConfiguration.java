@@ -19,7 +19,6 @@
  */
 package org.xwiki.contrib.oidc.auth.internal;
 
-import com.nimbusds.oauth2.sdk.pkce.CodeVerifier;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.net.MalformedURLException;
@@ -59,6 +58,8 @@ import org.xwiki.container.Container;
 import org.xwiki.container.Request;
 import org.xwiki.container.Session;
 import org.xwiki.container.servlet.ServletSession;
+import org.xwiki.context.Execution;
+import org.xwiki.context.ExecutionContext;
 import org.xwiki.contrib.oidc.OAuth2Exception;
 import org.xwiki.contrib.oidc.OAuth2TokenStore;
 import org.xwiki.contrib.oidc.OIDCIdToken;
@@ -76,6 +77,7 @@ import org.xwiki.contrib.oidc.provider.internal.endpoint.LogoutOIDCEndpoint;
 import org.xwiki.contrib.oidc.provider.internal.endpoint.RegisterAddOIDCEndpoint;
 import org.xwiki.contrib.oidc.provider.internal.endpoint.TokenOIDCEndpoint;
 import org.xwiki.contrib.oidc.provider.internal.endpoint.UserInfoOIDCEndpoint;
+import org.xwiki.contrib.usercommon.formatter.UserFormatterFactory;
 import org.xwiki.instance.InstanceIdManager;
 import org.xwiki.model.reference.EntityReferenceSerializer;
 import org.xwiki.model.reference.LocalDocumentReference;
@@ -98,6 +100,7 @@ import com.nimbusds.oauth2.sdk.http.HTTPRequest;
 import com.nimbusds.oauth2.sdk.http.HTTPResponse;
 import com.nimbusds.oauth2.sdk.id.ClientID;
 import com.nimbusds.oauth2.sdk.id.Issuer;
+import com.nimbusds.oauth2.sdk.pkce.CodeVerifier;
 import com.nimbusds.oauth2.sdk.token.AccessToken;
 import com.nimbusds.oauth2.sdk.token.BearerAccessToken;
 import com.nimbusds.oauth2.sdk.token.RefreshToken;
@@ -168,6 +171,16 @@ public class OIDCClientConfiguration extends OIDCConfiguration
 
     public static final String PROP_USER_NAMEFORMATER = "oidc.user.nameFormater";
 
+    /**
+     * @since 2.23.0
+     */
+    public static final String PROP_USER_NAMEFORBIDDENPATTERN = "oidc.user.nameForbiddenPattern";
+
+    /**
+     * @since 2.23.0
+     */
+    public static final String PROP_USER_NAMEFORBIDDENREPLACEMENT = "oidc.user.nameForbiddenReplacement";
+
     public static final String DEFAULT_USER_NAMEFORMATER =
         "${oidc.issuer.host._clean}-${oidc.user.preferredUsername._clean}";
 
@@ -175,6 +188,16 @@ public class OIDCClientConfiguration extends OIDCConfiguration
      * @since 1.11
      */
     public static final String PROP_USER_SUBJECTFORMATER = "oidc.user.subjectFormater";
+
+    /**
+     * @since 2.23.0
+     */
+    public static final String PROP_USER_SUBJECTFORBIDDENREPLACEMENT = "oidc.user.subjectForbiddenReplacement";
+
+    /**
+     * @since 2.23.0
+     */
+    public static final String PROP_USER_SUBJECTFORBIDDENPATTERN = "oidc.user.subjectForbiddenPattern";
 
     /**
      * @since 1.18
@@ -222,6 +245,11 @@ public class OIDCClientConfiguration extends OIDCConfiguration
     public static final String PROP_SECRET = "oidc.secret";
 
     public static final String PROP_SKIPPED = "oidc.skipped";
+
+    /**
+     * @since 2.24.0
+     */
+    public static final String PROP_TRYLOCAL = "oidc.tryLocal";
 
     /**
      * @since 1.13
@@ -333,6 +361,16 @@ public class OIDCClientConfiguration extends OIDCConfiguration
 
     public static final String PROP_SESSION_ACCESSTOKEN = "oidc.accesstoken";
 
+    /**
+     * @since 2.22.0
+     */
+    public static final String PROP_SESSION_REFRESHTOKEN = "oidc.refreshtoken";
+
+    /**
+     * @since 2.22.0
+     */
+    public static final String PROP_SESSION_ACCESSTOKEN_EXPIRATION_TIMESTAMP = "oidc.accesstoken.expirationtimestamp";
+
     public static final String PROP_SESSION_IDTOKEN = "oidc.idtoken";
 
     /**
@@ -414,6 +452,7 @@ public class OIDCClientConfiguration extends OIDCConfiguration
 
     /**
      * Support for PKCE
+     * 
      * @since 2.20.0
      */
     public static final String PROP_SESSION_CODE_VERIFIER = "oidc.codeverifier";
@@ -423,21 +462,23 @@ public class OIDCClientConfiguration extends OIDCConfiguration
      *
      * @since 2.20.4
      */
-    public static final String PROP_BEARER_ENABLED = OIDCConfiguration.PREFIX_PROP + "bearer.enabled";
+    public static final String PROP_CLIENTBEARER_ENABLED = OIDCConfiguration.PREFIX_PROP + "clientbearer.enabled";
 
     /**
      * Expected issuer for bearer tokens. Defaults to the configured OIDC provider.
      *
      * @since 2.20.4
      */
-    public static final String PROP_BEARER_ISSUER = OIDCConfiguration.PREFIX_PROP + "bearer.issuer";
+    public static final String PROP_CLIENTBEARER_ISSUER = OIDCConfiguration.PREFIX_PROP + "clientbearer.issuer";
 
     /**
      * JWT claim to use for user identity when authenticating via bearer token.
      *
      * @since 2.20.4
      */
-    public static final String PROP_BEARER_USERCLAIM = OIDCConfiguration.PREFIX_PROP + "bearer.userclaim";
+    public static final String PROP_CLIENTBEARER_USERCLAIM = OIDCConfiguration.PREFIX_PROP + "clientbearer.userclaim";
+
+    private static final String CONTEXTPROP_SESSION = "oidc.clientsession";
 
     @Inject
     private InstanceIdManager instance;
@@ -475,11 +516,33 @@ public class OIDCClientConfiguration extends OIDCConfiguration
     @Inject
     private EntityReferenceSerializer<String> entityReferenceResolver;
 
+    @Inject
+    private Execution execution;
+
+    /**
+     * @param oidcSession the session to store in the execution context. This is useful when using the configuration
+     *            from a runnable called when the http session is already gone.
+     * @since 2.4.0
+     */
+    public void setContextOIDCSession(Map<String, Object> oidcSession)
+    {
+        ExecutionContext context = execution.getContext();
+        if (context != null) {
+            context.setProperty(OIDCClientConfiguration.CONTEXTPROP_SESSION, oidcSession);
+        }
+    }
+
     /**
      * @since 2.4.0
      */
     public Map<String, Object> getOIDCSession(boolean create)
     {
+        ExecutionContext context = this.execution.getContext();
+        Map<String, Object> s = context == null ? null : (Map<String, Object>) context.getProperty(CONTEXTPROP_SESSION);
+        if (s != null) {
+            return s;
+        }
+
         Session session = this.container.getSession();
         if (session instanceof ServletSession) {
             HttpSession httpSession = ((ServletSession) session).getHttpSession();
@@ -533,7 +596,11 @@ public class OIDCClientConfiguration extends OIDCConfiguration
     {
         Map<String, Object> session = getOIDCSession(true);
         if (session != null) {
-            session.put(name, value);
+            if (value == null) {
+                session.remove(name);
+            } else {
+                session.put(name, value);
+            }
         }
     }
 
@@ -634,7 +701,7 @@ public class OIDCClientConfiguration extends OIDCConfiguration
             return sessionValue;
         }
 
-        // Get the property form the wiki configuration
+        // Get the property from the wiki configuration
         org.xwiki.contrib.oidc.auth.store.OIDCClientConfiguration wikiClientConfiguration =
             getWikiClientConfiguration();
         if (wikiClientConfiguration != null) {
@@ -668,6 +735,38 @@ public class OIDCClientConfiguration extends OIDCConfiguration
         return userFormatter;
     }
 
+    private Pattern getForbiddenPattern(String prop)
+    {
+        return compilePropertyIntoPattern(prop, UserFormatterFactory.DEFAULT_FORBIDDEN_PATTERN);
+    }
+
+    private String getForbiddenReplacement(String prop)
+    {
+        String forbiddenReplacement = getProperty(prop, String.class);
+        if (StringUtils.isEmpty(forbiddenReplacement)) {
+            // The condition is only correct because DEFAULT_FORBIDDEN_REPLACEMENT is the empty String
+            return UserFormatterFactory.DEFAULT_FORBIDDEN_REPLACEMENT;
+        }
+
+        return forbiddenReplacement;
+    }
+
+    /**
+     * @since 2.23.0
+     */
+    public Pattern getSubjectForbiddenPattern()
+    {
+        return getForbiddenPattern(PROP_USER_SUBJECTFORBIDDENPATTERN);
+    }
+
+    /**
+     * @since 2.23.0
+     */
+    public String getSubjectForbiddenReplacement()
+    {
+        return getForbiddenReplacement(PROP_USER_SUBJECTFORBIDDENREPLACEMENT);
+    }
+
     /**
      * @since 1.11
      */
@@ -679,6 +778,22 @@ public class OIDCClientConfiguration extends OIDCConfiguration
         }
 
         return userFormatter;
+    }
+
+    /**
+     * @since 2.23.0
+     */
+    public Pattern getXWikiUserNameForbiddenPattern()
+    {
+        return getForbiddenPattern(PROP_USER_NAMEFORBIDDENPATTERN);
+    }
+
+    /**
+     * @since 2.23.0
+     */
+    public String getXWikiUserNameForbiddenReplacement()
+    {
+        return getForbiddenReplacement(PROP_USER_NAMEFORBIDDENREPLACEMENT);
     }
 
     /**
@@ -971,6 +1086,7 @@ public class OIDCClientConfiguration extends OIDCConfiguration
 
     /**
      * PKCE support
+     * 
      * @since 2.20.0
      */
     public CodeVerifier getSessionCodeVerifier()
@@ -1027,7 +1143,16 @@ public class OIDCClientConfiguration extends OIDCConfiguration
 
     public boolean isSkipped()
     {
-        return getProperty(PROP_SKIPPED, false);
+        if (isTryLocalEnabled()) {
+            return getProperty(PROP_SKIPPED, false);
+        }
+
+        return false;
+    }
+
+    public boolean isTryLocalEnabled()
+    {
+        return getProperty(PROP_TRYLOCAL, true);
     }
 
     /**
@@ -1198,7 +1323,7 @@ public class OIDCClientConfiguration extends OIDCConfiguration
      */
     public Pattern getGroupMappingIncludePattern()
     {
-        return compilePropertyIntoPattern(PROP_GROUPS_MAPPING_INCLUDE);
+        return compilePropertyIntoPattern(PROP_GROUPS_MAPPING_INCLUDE, null);
     }
 
     /**
@@ -1206,22 +1331,23 @@ public class OIDCClientConfiguration extends OIDCConfiguration
      */
     public Pattern getGroupMappingExcludePattern()
     {
-        return compilePropertyIntoPattern(PROP_GROUPS_MAPPING_EXCLUDE);
+        return compilePropertyIntoPattern(PROP_GROUPS_MAPPING_EXCLUDE, null);
     }
 
-    private Pattern compilePropertyIntoPattern(String propertyName)
+    private Pattern compilePropertyIntoPattern(String propertyName, Pattern def)
     {
         String regex = getProperty(propertyName, String.class);
 
         if (StringUtils.isEmpty(regex)) {
-            return null;
+            return def;
         }
         try {
+            // TODO: don't compile each time (but allow changes coming from the wiki configuration)
             return Pattern.compile(regex);
         } catch (PatternSyntaxException e) {
             logger.warn("Exception while compiling regex {} configured for {}, skipping configuration", regex,
                 propertyName, e);
-            return null;
+            return def;
         }
     }
 
@@ -1361,7 +1487,6 @@ public class OIDCClientConfiguration extends OIDCConfiguration
 
     /**
      * @return {@code true} if the ID Token should be skipped at logout, or {@code false} otherwise.
-     *
      * @since 2.18.0
      */
     public boolean skipIdTokenFromLogout()
@@ -1380,20 +1505,53 @@ public class OIDCClientConfiguration extends OIDCConfiguration
     }
 
     /**
+     * @since 2.22.0
+     */
+    public RefreshToken getRefreshToken()
+    {
+        String refreshTokenValue = getSessionAttribute(PROP_SESSION_REFRESHTOKEN);
+
+        return refreshTokenValue != null ? new RefreshToken(refreshTokenValue) : null;
+    }
+
+    /**
      * @since 1.2
      */
     public void setAccessToken(AccessToken accessToken, RefreshToken refreshToken)
     {
         if (isAuthenticationConfiguration()) {
-            // Don't store the BearerAccessToken object directly as it could cause classloader problems when an extension is
+            // Don't store the BearerAccessToken object directly as it could cause classloader problems when an
+            // extension is
             // upgraded
             setSessionAttribute(PROP_SESSION_ACCESSTOKEN, accessToken.getValue());
+            setSessionAttribute(PROP_SESSION_REFRESHTOKEN, refreshToken == null ? null : refreshToken.getValue());
+
+            long lifetime = accessToken.getLifetime();
+            if (lifetime == 0) {
+                setSessionAttribute(PROP_SESSION_ACCESSTOKEN_EXPIRATION_TIMESTAMP, 0L);
+            } else {
+                long expirationTimestamp = System.currentTimeMillis() + (lifetime * 1000);
+                setSessionAttribute(PROP_SESSION_ACCESSTOKEN_EXPIRATION_TIMESTAMP, expirationTimestamp);
+            }
         }
     }
 
     /**
+     * @since 2.22.0
+     */
+    public boolean isAccessTokenExpired()
+    {
+        Long expirationTimestamp = getSessionAttribute(PROP_SESSION_ACCESSTOKEN_EXPIRATION_TIMESTAMP);
+        if (expirationTimestamp == null || expirationTimestamp == 0) {
+            // we don't have expiration data
+            return false;
+        }
+
+        return expirationTimestamp <= System.currentTimeMillis();
+    }
+
+    /**
      * @since 2.15.0
-     *
      * @param accessToken the access token to store
      * @param refreshToken the refresh token to store
      */
@@ -1402,8 +1560,8 @@ public class OIDCClientConfiguration extends OIDCConfiguration
         org.xwiki.contrib.oidc.auth.store.OIDCClientConfiguration wikiConfiguration = getWikiClientConfiguration();
 
         if (wikiConfiguration != null
-            && !org.xwiki.contrib.oidc.auth.store.OIDCClientConfiguration.TokenStorageScope.NONE.equals(
-            wikiConfiguration.getTokenStorageScope())) {
+            && !org.xwiki.contrib.oidc.auth.store.OIDCClientConfiguration.TokenStorageScope.NONE
+                .equals(wikiConfiguration.getTokenStorageScope())) {
             try {
                 XWikiContext context = contextProvider.get();
                 XWikiUser user = context.getWiki().checkAuth(context);
@@ -1413,8 +1571,8 @@ public class OIDCClientConfiguration extends OIDCConfiguration
                     tokenStore.getConfiguredObjectReference(wikiConfiguration), accessToken, refreshToken);
                 tokenStore.saveToken(token);
             } catch (OAuth2Exception | XWikiException e) {
-                logger.error("Failed to save access token [{}] for configuration [{}]",
-                    accessToken, wikiConfiguration, e);
+                logger.error("Failed to save access token [{}] for configuration [{}]", accessToken, wikiConfiguration,
+                    e);
             }
         }
     }
@@ -1572,7 +1730,8 @@ public class OIDCClientConfiguration extends OIDCConfiguration
             return sessionProviderName;
         }
 
-        String cookieName = configuration.getProperty(CLIENT_CONFIGURATION_COOKIE_PROPERTY, DEFAULT_OIDC_CONFIGURATION_COOKIE);
+        String cookieName =
+            configuration.getProperty(CLIENT_CONFIGURATION_COOKIE_PROPERTY, DEFAULT_OIDC_CONFIGURATION_COOKIE);
 
         String fallbackProviderName =
             configuration.getProperty(DEFAULT_CLIENT_CONFIGURATION_PROPERTY, DEFAULT_CLIENT_CONFIGURATION);
@@ -1644,8 +1803,20 @@ public class OIDCClientConfiguration extends OIDCConfiguration
             case PROP_USER_SUBJECTFORMATER:
                 returnValue = clientConfiguration.getUserSubjectFormatter();
                 break;
+            case PROP_USER_SUBJECTFORBIDDENPATTERN:
+                returnValue = clientConfiguration.getUserSubjectForbiddenPattern();
+                break;
+            case PROP_USER_SUBJECTFORBIDDENREPLACEMENT:
+                returnValue = clientConfiguration.getUserSubjectForbiddenReplacement();
+                break;
             case PROP_USER_NAMEFORMATER:
                 returnValue = clientConfiguration.getUserNameFormatter();
+                break;
+            case PROP_USER_NAMEFORBIDDENPATTERN:
+                returnValue = clientConfiguration.getUserNameForbiddenPattern();
+                break;
+            case PROP_USER_NAMEFORBIDDENREPLACEMENT:
+                returnValue = clientConfiguration.getUserNameForbiddenReplacement();
                 break;
             case PROP_USER_MAPPING:
                 returnValue = clientConfiguration.getUserMapping();
@@ -1722,6 +1893,9 @@ public class OIDCClientConfiguration extends OIDCConfiguration
             case PROP_SKIP_LOGOUT_ID_TOKEN:
                 returnValue = clientConfiguration.isIdTokenSkippedFromLogout();
                 break;
+            case PROP_TRYLOCAL:
+                returnValue = clientConfiguration.isTryLocal();
+                break;
         }
 
         this.logger.debug("The value of configuration property [{}] is [{}]", key, returnValue);
@@ -1742,15 +1916,15 @@ public class OIDCClientConfiguration extends OIDCConfiguration
         return null;
     }
 
-    // -- Bearer token authentication properties --
+    // -- Client bearer token authentication properties (JWTs from the external OIDC provider) --
 
     /**
      * @return true if bearer token authentication is enabled for REST API requests
      * @since 2.20.4
      */
-    public boolean isBearerTokenEnabled()
+    public boolean isClientBearerEnabled()
     {
-        Boolean enabled = getProperty(PROP_BEARER_ENABLED, Boolean.class);
+        Boolean enabled = getProperty(PROP_CLIENTBEARER_ENABLED, Boolean.class);
 
         return enabled != null && enabled;
     }
@@ -1759,9 +1933,9 @@ public class OIDCClientConfiguration extends OIDCConfiguration
      * @return the expected issuer for bearer tokens, or null to derive from provider
      * @since 2.20.4
      */
-    public String getBearerIssuer()
+    public String getClientBearerIssuer()
     {
-        String issuer = getProperty(PROP_BEARER_ISSUER, String.class);
+        String issuer = getProperty(PROP_CLIENTBEARER_ISSUER, String.class);
 
         if (issuer != null) {
             return issuer;
@@ -1777,9 +1951,9 @@ public class OIDCClientConfiguration extends OIDCConfiguration
      * @return the JWT claim to use for user identity in bearer tokens
      * @since 2.20.4
      */
-    public String getBearerUserClaim()
+    public String getClientBearerUserClaim()
     {
-        String claim = getProperty(PROP_BEARER_USERCLAIM, String.class);
+        String claim = getProperty(PROP_CLIENTBEARER_USERCLAIM, String.class);
 
         return claim != null ? claim : "preferred_username";
     }

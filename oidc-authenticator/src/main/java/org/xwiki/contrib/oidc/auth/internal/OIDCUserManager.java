@@ -45,14 +45,30 @@ import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.inject.Provider;
 import javax.inject.Singleton;
+import javax.servlet.http.HttpSession;
 
+import com.nimbusds.oauth2.sdk.AccessTokenResponse;
+import com.nimbusds.oauth2.sdk.RefreshTokenGrant;
+import com.nimbusds.oauth2.sdk.Scope;
+import com.nimbusds.oauth2.sdk.TokenRequest;
+import com.nimbusds.oauth2.sdk.TokenResponse;
+import com.nimbusds.oauth2.sdk.auth.ClientAuthentication;
+import com.nimbusds.oauth2.sdk.auth.ClientSecretBasic;
+import com.nimbusds.oauth2.sdk.auth.Secret;
+import com.nimbusds.oauth2.sdk.token.BearerTokenError;
+import com.nimbusds.oauth2.sdk.token.RefreshToken;
+import com.nimbusds.oauth2.sdk.token.Tokens;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.io.FilenameUtils;
-import org.apache.commons.lang3.RegExUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.apache.commons.text.StringSubstitutor;
 import org.apache.http.client.utils.URIBuilder;
+import org.xwiki.container.Container;
+import org.xwiki.container.Session;
+import org.xwiki.container.servlet.ServletSession;
+import org.xwiki.context.Execution;
+import org.xwiki.contrib.usercommon.formatter.UserFormatter;
+import org.xwiki.contrib.usercommon.formatter.UserFormatterFactory;
 import org.securityfilter.realm.SimplePrincipal;
 import org.slf4j.Logger;
 import org.xwiki.component.annotation.Component;
@@ -66,7 +82,7 @@ import org.xwiki.contrib.oidc.auth.store.OIDCUserStore;
 import org.xwiki.contrib.oidc.event.OIDCUserEventData;
 import org.xwiki.contrib.oidc.event.OIDCUserUpdated;
 import org.xwiki.contrib.oidc.event.OIDCUserUpdating;
-import org.xwiki.contrib.oidc.provider.internal.OIDCException;
+import org.xwiki.contrib.oidc.provider.internal.OIDCProviderException;
 import org.xwiki.contrib.oidc.provider.internal.OIDCManager;
 import org.xwiki.model.reference.DocumentReference;
 import org.xwiki.model.reference.SpaceReference;
@@ -136,6 +152,15 @@ public class OIDCUserManager
     @Inject
     private Logger logger;
 
+    @Inject
+    private UserFormatterFactory userFormatterFactory;
+
+    @Inject
+    private Container container;
+
+    @Inject
+    private Execution execution;
+
     private Executor executor = Executors.newFixedThreadPool(1);
 
     private static final String XWIKI_GROUP_MEMBERFIELD = "member";
@@ -146,12 +171,25 @@ public class OIDCUserManager
 
     public void updateUserInfoAsync()
     {
-        final IDTokenClaimsSet idToken = this.configuration.getIdToken();
-        final AccessToken accessToken = this.configuration.getAccessToken();
-
+        Map<String, Object> oidcSession = this.configuration.getOIDCSession(false);
+        Session session = this.container.getSession();
+        HttpSession httpSession = (session instanceof ServletSession)
+            ? ((ServletSession) session).getHttpSession()
+            : null;
         this.executor.execute(new ExecutionContextRunnable(() -> {
             try {
-                updateUser(idToken, accessToken);
+                // In the runnable, the http request is finished, we need to provide the session to use.
+                // The execution context will be automatically removed at the end of the execution of this lambda,
+                // freeing the oidc session object
+                configuration.setContextOIDCSession(oidcSession);
+
+                UserInfo userInfo = getUserInfo();
+                updateUser(userInfo);
+            } catch (InvalidAccessTokenException e) {
+                if (httpSession != null) {
+                    logger.debug("Failed to update user info while refreshing the token, invalidating the session", e);
+                    this.sessions.logout(httpSession);
+                }
             } catch (Exception e) {
                 logger.error("Failed to update user informations", e);
             }
@@ -182,9 +220,49 @@ public class OIDCUserManager
         }
     }
 
-    public UserInfo getUserInfo(AccessToken accessToken) throws OIDCException, IOException, URISyntaxException,
-        GeneralException, JOSEException, BadJOSEException, ParseException
+    private void refreshAccessToken() throws GeneralException, URISyntaxException,
+        IOException, InvalidAccessTokenException
     {
+        RefreshToken refreshToken = this.configuration.getRefreshToken();
+        if (refreshToken == null) {
+            throw new InvalidAccessTokenException("Cannot refresh the access token because there is no refresh token");
+        }
+
+        Endpoint tokenEndpoint = this.configuration.getTokenOIDCEndpoint();
+        ClientID clientID = this.configuration.getClientID();
+        Secret secret = this.configuration.getSecret();
+        ClientAuthentication clientAuth = new ClientSecretBasic(clientID, secret);
+        Scope scope = this.configuration.getScope();
+        URI uri = tokenEndpoint.getURI();
+        TokenRequest request = new TokenRequest(uri, clientAuth, new RefreshTokenGrant(refreshToken), scope);
+        HTTPRequest httpRequest = tokenEndpoint.prepare(request.toHTTPRequest());
+        HTTPResponse httpResponse = httpRequest.send();
+        if (httpResponse.indicatesSuccess()) {
+            TokenResponse tokenResponse = TokenResponse.parse(httpResponse);
+            AccessTokenResponse successResponse = tokenResponse.toSuccessResponse();
+            Tokens tokens = successResponse.getTokens();
+            AccessToken accessToken = tokens.getAccessToken();
+            refreshToken = tokens.getRefreshToken();
+            this.configuration.setAccessToken(accessToken, refreshToken);
+            logger.debug("Successfully refresh the access token");
+        } else {
+            logger.debug("Failed to refresh the access token, got status [{}]: [{}]",
+                    httpResponse.getStatusCode(), httpResponse.getStatusMessage());
+            throw new InvalidAccessTokenException();
+        }
+    }
+
+    public UserInfo getUserInfo() throws OIDCProviderException, IOException, URISyntaxException,
+        GeneralException, JOSEException, BadJOSEException, ParseException, InvalidAccessTokenException
+    {
+        return getUserInfo(true);
+    }
+
+    private UserInfo getUserInfo(boolean canRefreshToken) throws OIDCProviderException, IOException, URISyntaxException,
+        GeneralException, JOSEException, BadJOSEException, ParseException, InvalidAccessTokenException
+    {
+        AccessToken accessToken = getAccessToken(canRefreshToken);
+
         Endpoint userInfoEndpoint = this.configuration.getUserInfoOIDCEndpoint();
 
         // Get OIDC user info
@@ -199,8 +277,19 @@ public class OIDCUserManager
         UserInfoResponse userinfoResponse = UserInfoResponse.parse(httpResponse);
 
         if (!userinfoResponse.indicatesSuccess()) {
+            UserInfoErrorResponse errorResponse = userinfoResponse.toErrorResponse();
+            if (BearerTokenError.INVALID_TOKEN.equals(errorResponse.getErrorObject())) {
+                // invalid_token happens when the access token is expired
+                // See https://datatracker.ietf.org/doc/html/rfc6750#section-3.1
+                this.logger.debug("OIDC user info endpoint replied with an invalid token error, " +
+                                          "trying to refresh the access token...");
+                if (canRefreshToken) {
+                    refreshAccessToken();
+                    return getUserInfo(false);
+                }
+            }
             UserInfoErrorResponse error = (UserInfoErrorResponse) userinfoResponse;
-            throw new OIDCException("Failed to get user info", error.getErrorObject());
+            throw new OIDCProviderException("Failed to get user info", error.getErrorObject());
         }
 
         // Restart user information expiration counter
@@ -232,15 +321,18 @@ public class OIDCUserManager
         return userinfo;
     }
 
-    public SimplePrincipal updateUser(IDTokenClaimsSet idToken, AccessToken accessToken)
-        throws IOException, OIDCException, XWikiException, QueryException, URISyntaxException, GeneralException,
-        JOSEException, BadJOSEException, ParseException
+    private AccessToken getAccessToken(boolean canRefreshToken)
+            throws GeneralException, URISyntaxException, IOException, InvalidAccessTokenException
     {
-        // Update/Create XWiki user
-        return updateUser(idToken, getUserInfo(accessToken), accessToken);
+        if (canRefreshToken && configuration.isAccessTokenExpired()) {
+            logger.debug("The access token is expired, refreshing...");
+            refreshAccessToken();
+        }
+
+        return this.configuration.getAccessToken();
     }
 
-    private void checkAllowedGroups(List<String> providerGroups) throws OIDCException
+    private void checkAllowedGroups(List<String> providerGroups) throws OIDCProviderException
     {
         this.logger.debug("Checking allowed groups");
 
@@ -255,7 +347,7 @@ public class OIDCUserManager
                     this.logger.debug("User is not allowed");
 
                     // Allowed groups have priority over forbidden groups
-                    throw new OIDCException(
+                    throw new OIDCProviderException(
                         "The user is not allowed to authenticate because it's not a member of the following groups: "
                             + allowedGroups);
                 }
@@ -273,7 +365,7 @@ public class OIDCUserManager
                 if (CollectionUtils.containsAny(providerGroups, forbiddenGroups)) {
                     this.logger.debug("User is not allowed");
 
-                    throw new OIDCException(
+                    throw new OIDCProviderException(
                         "The user is not allowed to authenticate because it's a member of one of the following groups: "
                             + forbiddenGroups);
                 }
@@ -322,27 +414,28 @@ public class OIDCUserManager
         return (T) value;
     }
 
-    public SimplePrincipal updateUser(IDTokenClaimsSet idToken, UserInfo userInfo, AccessToken accessToken)
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+    public SimplePrincipal updateUser(UserInfo userInfo) throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
+        IDTokenClaimsSet idToken = this.configuration.getIdToken();
+
         // Get provider groups
         List<String> providerGroups = getProviderGroups(idToken, userInfo);
 
         // Check allowed/forbidden groups
         checkAllowedGroups(providerGroups);
 
-        Map<String, String> formatMap = createFormatMap(idToken, userInfo);
-        // Change the default StringSubstitutor behavior to produce an empty String instead of an unresolved pattern by
-        // default
-        StringSubstitutor substitutor = new StringSubstitutor(new OIDCStringLookup(formatMap));
+        Map<String, String> variables = createFormatMap(idToken, userInfo);
+        Pattern forbiddenPattern = this.configuration.getSubjectForbiddenPattern();
+        String forbiddenReplacement = this.configuration.getSubjectForbiddenReplacement();
+        UserFormatter userFormatter = userFormatterFactory.create(variables, forbiddenPattern, forbiddenReplacement);
 
-        String formattedSubject = formatSubject(substitutor);
+        String formattedSubject = userFormatter.format(this.configuration.getSubjectFormater());
 
         XWikiDocument userDocument = this.store.searchDocument(idToken.getIssuer().getValue(), formattedSubject);
 
         XWikiDocument modifiableDocument;
         if (userDocument == null) {
-            userDocument = getNewUserDocument(substitutor);
+            userDocument = getNewUserDocument(userFormatter);
 
             modifiableDocument = userDocument;
         } else {
@@ -416,6 +509,7 @@ public class OIDCUserManager
             try {
                 String filename = FilenameUtils.getName(userInfo.getPicture().toString());
                 URLConnection connection = userInfo.getPicture().toURL().openConnection();
+                AccessToken accessToken = this.configuration.getAccessToken();
                 if (accessToken != null) {
                     connection.setRequestProperty("Authorization", accessToken.toAuthorizationHeader());
                 }
@@ -455,7 +549,7 @@ public class OIDCUserManager
         this.store.updateOIDCUser(modifiableDocument, idToken.getIssuer().getValue(), formattedSubject);
 
         // Configured user mapping
-        updateUserMapping(modifiableDocument, userClass, userObject, xcontext, substitutor);
+        updateUserMapping(modifiableDocument, userClass, userObject, xcontext, userFormatter);
 
         // Data to send with the event
         OIDCUserEventData eventData =
@@ -504,7 +598,7 @@ public class OIDCUserManager
     }
 
     private void updateUserMapping(XWikiDocument userDocument, BaseClass userClass, BaseObject userObject,
-        XWikiContext xcontext, StringSubstitutor substitutor)
+        XWikiContext xcontext, UserFormatter userFormatter)
     {
         this.logger.debug("Updating User mapping");
 
@@ -514,7 +608,7 @@ public class OIDCUserManager
                 String xwikiProperty = entry.getKey();
                 String oidcFormat = entry.getValue();
 
-                String oidcValue = substitutor.replace(oidcFormat);
+                String oidcValue = userFormatter.format(oidcFormat);
 
                 setValue(userDocument, userClass, userObject, xwikiProperty, oidcValue, xcontext);
             }
@@ -822,7 +916,7 @@ public class OIDCUserManager
         xobject.set(key, cleanValue, xcontext);
     }
 
-    private XWikiDocument getNewUserDocument(StringSubstitutor substitutor) throws XWikiException, OIDCException
+    private XWikiDocument getNewUserDocument(UserFormatter userFormatter) throws XWikiException, OIDCProviderException
     {
         XWikiContext xcontext = this.xcontextProvider.get();
         BaseClass userClass = xcontext.getWiki().getUserClass(xcontext);
@@ -831,10 +925,12 @@ public class OIDCUserManager
         SpaceReference spaceReference = new SpaceReference(xcontext.getMainXWiki(), "XWiki");
 
         // Generate default document name
-        String documentName = formatXWikiUserName(substitutor);
+        userFormatter.setForbiddenPattern(this.configuration.getXWikiUserNameForbiddenPattern());
+        userFormatter.setForbiddenReplacement(this.configuration.getXWikiUserNameForbiddenReplacement());
+        String documentName = userFormatter.format(this.configuration.getXWikiUserNameFormater());
 
         if (StringUtils.isEmpty(documentName)) {
-            throw new OIDCException("The user document name resulting from the format ["
+            throw new OIDCProviderException("The user document name resulting from the format ["
                 + this.configuration.getXWikiUserNameFormater() + "] is empty");
         }
 
@@ -861,66 +957,41 @@ public class OIDCUserManager
         return document;
     }
 
-    private String clean(String str)
-    {
-        return RegExUtils.removePattern(str, "[\\.\\:\\s,@\\^]");
-    }
-
-    private void putVariable(Map<String, String> map, String key, String value)
-    {
-        if (value != null) {
-            map.put(key, value);
-
-            map.put(key + ".lowerCase", value.toLowerCase());
-            map.put(key + "._lowerCase", value.toLowerCase());
-            map.put(key + ".upperCase", value.toUpperCase());
-            map.put(key + "._upperCase", value.toUpperCase());
-
-            String cleanValue = clean(value);
-            map.put(key + ".clean", cleanValue);
-            map.put(key + "._clean", cleanValue);
-            map.put(key + ".clean.lowerCase", cleanValue.toLowerCase());
-            map.put(key + "._clean._lowerCase", cleanValue.toLowerCase());
-            map.put(key + ".clean.upperCase", cleanValue.toUpperCase());
-            map.put(key + "._clean._upperCase", cleanValue.toUpperCase());
-        }
-    }
-
     private Map<String, String> createFormatMap(IDTokenClaimsSet idToken, UserInfo userInfo)
         throws MalformedURLException
     {
         Map<String, String> formatMap = new HashMap<>();
 
         // User information
-        putVariable(formatMap, "oidc.user.subject", userInfo.getSubject().getValue());
+        formatMap.put("oidc.user.subject", userInfo.getSubject().getValue());
         if (userInfo.getPreferredUsername() != null) {
-            putVariable(formatMap, "oidc.user.preferredUsername", userInfo.getPreferredUsername());
+            formatMap.put("oidc.user.preferredUsername", userInfo.getPreferredUsername());
         } else {
-            putVariable(formatMap, "oidc.user.preferredUsername", userInfo.getSubject().getValue());
+            formatMap.put("oidc.user.preferredUsername", userInfo.getSubject().getValue());
         }
-        putVariable(formatMap, "oidc.user.mail", userInfo.getEmailAddress() == null ? "" : userInfo.getEmailAddress());
-        putVariable(formatMap, "oidc.user.familyName", userInfo.getFamilyName());
-        putVariable(formatMap, "oidc.user.givenName", userInfo.getGivenName());
+        formatMap.put("oidc.user.mail", userInfo.getEmailAddress() == null ? "" : userInfo.getEmailAddress());
+        formatMap.put("oidc.user.familyName", userInfo.getFamilyName());
+        formatMap.put("oidc.user.givenName", userInfo.getGivenName());
 
         // Provider
         String providerString = this.configuration.getProvider();
         if (providerString != null) {
             URL providerURL = new URL(providerString);
-            putVariable(formatMap, "oidc.provider", providerURL.toString());
-            putVariable(formatMap, "oidc.provider.host", providerURL.getHost());
-            putVariable(formatMap, "oidc.provider.path", providerURL.getPath());
-            putVariable(formatMap, "oidc.provider.protocol", providerURL.getProtocol());
-            putVariable(formatMap, "oidc.provider.port", String.valueOf(providerURL.getPort()));
+            formatMap.put("oidc.provider", providerURL.toString());
+            formatMap.put("oidc.provider.host", providerURL.getHost());
+            formatMap.put("oidc.provider.path", providerURL.getPath());
+            formatMap.put("oidc.provider.protocol", providerURL.getProtocol());
+            formatMap.put("oidc.provider.port", String.valueOf(providerURL.getPort()));
         }
 
         // Issuer
-        putVariable(formatMap, "oidc.issuer", idToken.getIssuer().getValue());
+        formatMap.put("oidc.issuer", idToken.getIssuer().getValue());
         try {
             URI issuerURI = new URI(idToken.getIssuer().getValue());
-            putVariable(formatMap, "oidc.issuer.host", issuerURI.getHost());
-            putVariable(formatMap, "oidc.issuer.path", issuerURI.getPath());
-            putVariable(formatMap, "oidc.issuer.scheme", issuerURI.getScheme());
-            putVariable(formatMap, "oidc.issuer.port", String.valueOf(issuerURI.getPort()));
+            formatMap.put("oidc.issuer.host", issuerURI.getHost());
+            formatMap.put("oidc.issuer.path", issuerURI.getPath());
+            formatMap.put("oidc.issuer.scheme", issuerURI.getScheme());
+            formatMap.put("oidc.issuer.port", String.valueOf(issuerURI.getPort()));
         } catch (URISyntaxException e) {
             // TODO: log something ?
         }
@@ -939,20 +1010,10 @@ public class OIDCUserManager
                 if (entry.getValue() instanceof Map) {
                     addJSON(prefix + entry.getKey() + '.', (Map) entry.getValue(), formatMap);
                 } else {
-                    putVariable(formatMap, prefix + entry.getKey(), entry.getValue().toString());
+                    formatMap.put(prefix + entry.getKey(), entry.getValue().toString());
                 }
             }
         }
-    }
-
-    private String formatXWikiUserName(StringSubstitutor substitutor)
-    {
-        return substitutor.replace(this.configuration.getXWikiUserNameFormater());
-    }
-
-    private String formatSubject(StringSubstitutor substitutor)
-    {
-        return substitutor.replace(this.configuration.getSubjectFormater());
     }
 
     public void logout() throws URISyntaxException, GeneralException, IOException

@@ -27,8 +27,10 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 
 import org.xwiki.component.annotation.Component;
+import org.xwiki.contrib.oidc.internal.OIDCConfiguration;
 import org.xwiki.contrib.oidc.provider.internal.OIDCManager;
 import org.xwiki.contrib.oidc.provider.internal.OIDCResourceReference;
+import org.xwiki.contrib.oidc.provider.internal.store.OIDCProviderStore;
 import org.xwiki.contrib.oidc.provider.internal.util.ContentResponse;
 
 import com.nimbusds.common.contenttype.ContentType;
@@ -55,6 +57,12 @@ public class ConfigurationOIDCEndpoint implements OIDCEndpoint
     @Inject
     private OIDCManager manager;
 
+    @Inject
+    private OIDCConfiguration configuration;
+
+    @Inject
+    private OIDCProviderStore providerStore;
+
     @Override
     public Response handle(HTTPRequest httpRequest, OIDCResourceReference reference) throws Exception
     {
@@ -70,12 +78,23 @@ public class ConfigurationOIDCEndpoint implements OIDCEndpoint
 
         metadata.setIDTokenJWSAlgs(List.of(JWSAlgorithm.RS256));
 
-        metadata.setAuthorizationEndpointURI(this.manager.createEndPointURI(AuthorizationOIDCEndpoint.HINT));
-        metadata.setTokenEndpointURI(this.manager.createEndPointURI(TokenOIDCEndpoint.HINT));
-        metadata.setUserInfoEndpointURI(this.manager.createEndPointURI(UserInfoOIDCEndpoint.HINT));
-        metadata.setRegistrationEndpointURI(this.manager.createEndPointURI(RegisterAddOIDCEndpoint.HINT));
-        metadata.setEndSessionEndpointURI(this.manager.createEndPointURI(LogoutOIDCEndpoint.HINT));
-        metadata.setSupportsBackChannelLogout(true);
+        if (this.configuration.isEndpointEnabled(AuthorizationOIDCEndpoint.HINT)) {
+            metadata.setAuthorizationEndpointURI(this.manager.createEndPointURI(AuthorizationOIDCEndpoint.HINT));
+        }
+        if (this.configuration.isEndpointEnabled(TokenOIDCEndpoint.HINT)) {
+            metadata.setTokenEndpointURI(this.manager.createEndPointURI(TokenOIDCEndpoint.HINT));
+        }
+        if (this.configuration.isEndpointEnabled(UserInfoOIDCEndpoint.HINT)) {
+            metadata.setUserInfoEndpointURI(this.manager.createEndPointURI(UserInfoOIDCEndpoint.HINT));
+        }
+        if (this.configuration.isEndpointEnabled(RegisterAddOIDCEndpoint.HINT)
+            && this.providerStore.isDynamicClientRegistration()) {
+            metadata.setRegistrationEndpointURI(this.manager.createEndPointURI(RegisterAddOIDCEndpoint.HINT));
+        }
+        if (this.configuration.isEndpointEnabled(LogoutOIDCEndpoint.HINT)) {
+            metadata.setEndSessionEndpointURI(this.manager.createEndPointURI(LogoutOIDCEndpoint.HINT));
+            metadata.setSupportsBackChannelLogout(true);
+        }
 
         return new ContentResponse(ContentType.APPLICATION_JSON, metadata.toJSONObject().toString(),
             HTTPResponse.SC_OK);

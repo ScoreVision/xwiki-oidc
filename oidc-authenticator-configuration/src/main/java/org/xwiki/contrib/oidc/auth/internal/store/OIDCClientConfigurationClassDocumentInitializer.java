@@ -69,7 +69,11 @@ public class OIDCClientConfigurationClassDocumentInitializer extends AbstractMan
         xclass.addTextAreaField(OIDCClientConfiguration.FIELD_FORBIDDEN_GROUPS, "Forbidden groups", 50, 10,
             TextAreaClass.EditorType.PURE_TEXT, TextAreaClass.ContentType.PURE_TEXT);
         xclass.addTextField(OIDCClientConfiguration.FIELD_FORMATTER_USER_SUBJECT, "Subject formatter", 255);
+        xclass.addTextField(OIDCClientConfiguration.FIELD_FORMATTER_USER_SUBJECT_FORBIDDEN_PATTERN, "Subject forbidden pattern", 255);
+        xclass.addTextField(OIDCClientConfiguration.FIELD_FORMATTER_USER_SUBJECT_FORBIDDEN_REPLACEMENT, "Subject forbidden replacement", 255);
         xclass.addTextField(OIDCClientConfiguration.FIELD_FORMATTER_USER_NAME, "XWiki username formatter", 255);
+        xclass.addTextField(OIDCClientConfiguration.FIELD_FORMATTER_USER_NAME_FORBIDDEN_PATTERN, "XWiki username forbidden pattern", 255);
+        xclass.addTextField(OIDCClientConfiguration.FIELD_FORMATTER_USER_NAME_FORBIDDEN_REPLACEMENT, "XWiki username forbidden replacement", 255);
         xclass.addTextAreaField(OIDCClientConfiguration.FIELD_USER_MAPPING, "User mapping", 50, 10,
             TextAreaClass.EditorType.PURE_TEXT, TextAreaClass.ContentType.PURE_TEXT);
         xclass.addTextField(OIDCClientConfiguration.FIELD_XWIKI_PROVIDER, "XWiki provider", 255);
@@ -88,7 +92,8 @@ public class OIDCClientConfigurationClassDocumentInitializer extends AbstractMan
             50, 10, TextAreaClass.EditorType.PURE_TEXT, TextAreaClass.ContentType.PURE_TEXT);
         xclass.addTextField(OIDCClientConfiguration.FIELD_ENDPOINT_LOGOUT_METHOD, "Logout endpoint method", 255);
         xclass.addTextField(OIDCClientConfiguration.FIELD_LOGOUT_MECHANISM, "Logout mechanism", 255);
-        xclass.addBooleanField(OIDCClientConfiguration.FIELD_SKIPPED, "Is authentication skipped ?", SELECT);
+        xclass.addBooleanField(OIDCClientConfiguration.FIELD_SKIPPED, "Is authentication skipped ?", SELECT, false);
+        xclass.addBooleanField(OIDCClientConfiguration.FIELD_TRY_LOCAL, "Is standard authenticator allowed?", SELECT, true);
         xclass.addTextField(OIDCClientConfiguration.FIELD_SCOPE, "Scope", 255);
         xclass.addTextField(OIDCClientConfiguration.FIELD_RESPONSE_TYPE, "Response type", 255);
         xclass.addTextAreaField(OIDCClientConfiguration.FIELD_CLAIMS_ID_TOKEN, "ID Token Claims", 50, 10,

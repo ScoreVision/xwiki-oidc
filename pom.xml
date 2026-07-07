@@ -31,7 +31,7 @@
   <groupId>org.xwiki.contrib.oidc</groupId>
   <artifactId>oidc</artifactId>
   <name>OpenID Connect</name>
-  <version>2.20.3</version>
+  <version>2.24.1-SNAPSHOT</version>
   <packaging>pom</packaging>
   <description>Various tools to manipulate OpenID Connect protocol in XWiki</description>
 
@@ -47,7 +47,7 @@
       <dependency>
         <groupId>com.nimbusds</groupId>
         <artifactId>oauth2-oidc-sdk</artifactId>
-        <version>11.37</version>
+        <version>11.37.2</version>
         <exclusions>
           <!-- We don't really need ASM in this context and it often conflicts with the version in the XWiki Standard WAR -->
           <exclusion>
@@ -59,7 +59,7 @@
       <dependency>
         <groupId>com.nimbusds</groupId>
         <artifactId>nimbus-jose-jwt</artifactId>
-        <version>10.8</version>
+        <version>10.9.1</version>
       </dependency>
       <dependency>
         <groupId>org.xwiki.commons</groupId>
@@ -73,6 +73,18 @@
           </exclusion>
         </exclusions>
       </dependency>
+      <dependency>
+        <groupId>org.xwiki.contrib.user-common</groupId>
+        <artifactId>user-common-formatter</artifactId>
+        <version>1.0.0</version>
+      </dependency>
+
+      <!-- TODO: remove when upgrading to XWiki 15.3+ -->
+      <dependency>
+        <groupId>org.xwiki.contrib</groupId>
+        <artifactId>authservice-backport-api</artifactId>
+        <version>1.1.1</version>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
@@ -80,10 +92,12 @@
     <module>oauth2-client</module>
     <module>oauth2-store</module>
     <module>oidc-api</module>
+    <module>oidc-consent</module>
     <module>oidc-provider</module>
     <module>oidc-authenticator-configuration</module>
     <module>oidc-authenticator-user</module>
     <module>oidc-authenticator</module>
+    <module>token-authenticator</module>
   </modules>
 
   <profiles>
@@ -154,6 +168,35 @@
               </differences>
             </revapi.differences>
             -->
+            <revapi.differences>
+              <justification>Moved to a different module</justification>
+              <criticality>allowed</criticality>
+              <differences>
+                <item>
+                  <ignore>true</ignore>
+                  <code>java.class.removed</code>
+                  <old>class org.xwiki.contrib.oidc.OAuth2Exception</old>
+                </item>
+                <item>
+                  <ignore>true</ignore>
+                  <code>java.class.removed</code>
+                  <old>class org.xwiki.contrib.oidc.provider.OIDCBridgeAuth</old>
+                </item>
+              </differences>
+            </revapi.differences>
+            <revapi.differences>
+              <justification>False positiive</justification>
+              <criticality>allowed</criticality>
+              <differences>
+                <item>
+                  <ignore>true</ignore>
+                  <code>java.class.nonFinalClassInheritsFromNewClass</code>
+                  <old>class org.xwiki.contrib.oidc.OAuth2Exception</old>
+                  <new>class org.xwiki.contrib.oidc.OAuth2Exception</new>
+                  <superClass>org.xwiki.contrib.oidc.OIDCException</superClass>
+                </item>
+              </differences>
+            </revapi.differences>
           </analysisConfiguration>
         </configuration>
       </plugin>
@@ -173,6 +216,6 @@
     <connection>scm:git:git://github.com/xwiki-contrib/oidc.git</connection>
     <developerConnection>scm:git:git@github.com:xwiki-contrib/oidc.git</developerConnection>
     <url>https://github.com/xwiki-contrib/oidc/tree/master</url>
-    <tag>oidc-2.20.3</tag>
+    <tag>HEAD</tag>
   </scm>
 </project>

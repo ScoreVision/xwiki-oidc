@@ -19,36 +19,56 @@
  */
 package org.xwiki.contrib.oidc.auth.internal;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import javax.inject.Named;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpSession;
 
+import com.nimbusds.oauth2.sdk.token.BearerTokenError;
+import com.nimbusds.oauth2.sdk.token.RefreshToken;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.collections4.ListUtils;
 import org.joda.time.LocalDateTime;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.mockito.Spy;
 import org.xwiki.container.Container;
+import org.xwiki.container.servlet.ServletSession;
 import org.xwiki.contrib.oidc.OAuth2TokenStore;
 import org.xwiki.contrib.oidc.auth.internal.session.ClientProviders;
 import org.xwiki.contrib.oidc.auth.internal.store.DefaultOIDCUserStore;
 import org.xwiki.contrib.oidc.auth.internal.store.OIDCUserClassDocumentInitializer;
 import org.xwiki.contrib.oidc.auth.store.OIDCClientConfigurationStore;
 import org.xwiki.contrib.oidc.auth.store.OIDCUser;
-import org.xwiki.contrib.oidc.provider.internal.OIDCException;
+import org.xwiki.contrib.oidc.consent.internal.store.OIDCConsentStore;
 import org.xwiki.contrib.oidc.provider.internal.OIDCManager;
 import org.xwiki.contrib.oidc.provider.internal.OIDCProviderConfiguration;
+import org.xwiki.contrib.oidc.provider.internal.OIDCProviderException;
 import org.xwiki.contrib.oidc.provider.internal.session.OIDCClients;
 import org.xwiki.contrib.oidc.provider.internal.session.ProviderOIDCSessions;
-import org.xwiki.contrib.oidc.provider.internal.store.OIDCStore;
+import org.xwiki.contrib.oidc.provider.internal.store.OIDCProviderStore;
+import org.xwiki.contrib.usercommon.formatter.internal.DefaultUserFormatterFactory;
 import org.xwiki.environment.Environment;
 import org.xwiki.instance.InstanceIdManager;
 import org.xwiki.localization.ContextualLocalizationManager;
@@ -95,8 +115,8 @@ import static org.mockito.Mockito.when;
  */
 @OldcoreTest
 @ComponentList({OIDCManager.class, OIDCClientConfiguration.class, DefaultOIDCUserStore.class,
-    OIDCProviderConfiguration.class, OIDCStore.class, ProviderOIDCSessions.class, OIDCClients.class,
-    ClientProviders.class})
+    OIDCProviderConfiguration.class, OIDCProviderStore.class, OIDCConsentStore.class, ProviderOIDCSessions.class,
+    OIDCClients.class, ClientProviders.class, DefaultUserFormatterFactory.class})
 @ReferenceComponentList
 class OIDCUserManagerTest
 {
@@ -143,6 +163,10 @@ class OIDCUserManagerTest
     @MockComponent
     OAuth2TokenStore tokenStore;
 
+    @InjectMockComponents
+    @Spy
+    OIDCClientConfiguration configuration;
+
     private DocumentReference xwikiallgroupReference;
 
     private DocumentReference oidcClassReference;
@@ -158,7 +182,7 @@ class OIDCUserManagerTest
     private DocumentReference pgroup2Reference;
 
     @BeforeEach
-    public void beforeEach() throws Exception
+    void beforeEach() throws Exception
     {
         when(queryManager.createQuery(Mockito.anyString(), Mockito.anyString())).thenReturn(mock(Query.class));
 
@@ -179,6 +203,25 @@ class OIDCUserManagerTest
         this.pgroup2Reference = new DocumentReference(this.oldcore.getXWikiContext().getWikiId(), "XWiki", "pgroup2");
 
         when(oidcClientConfigurationStore.getOIDCClientConfigurationDocument("default")).thenReturn(null);
+
+        initializeSessionForOIDCClientConfiguration();
+        Issuer issuer = new Issuer("http://issuer");
+        Subject subject = new Subject("subject");
+        configuration.setAccessToken(new BearerAccessToken(), new RefreshToken());
+        configuration.setIdToken(createIDTokenClaimsSet(issuer, subject));
+    }
+
+    private void initializeSessionForOIDCClientConfiguration()
+    {
+        HttpServletRequest httpServletRequest = mock(HttpServletRequest.class);
+        HttpSession httpSession = mock(HttpSession.class);
+        HashMap<String, String> session = new HashMap<>();
+        when(httpSession.getAttribute(OIDCClientConfiguration.SESSION)).thenReturn(session);
+        when(httpServletRequest.getSession()).thenReturn(httpSession);
+        when(httpServletRequest.getSession(true)).thenReturn(httpSession);
+        ServletSession servletSession = new ServletSession(httpServletRequest);
+        when(container.getSession()).thenReturn(servletSession);
+        when(container.getSession()).thenReturn(servletSession);
     }
 
     private void addMember(DocumentReference group, String member) throws XWikiException
@@ -233,11 +276,9 @@ class OIDCUserManagerTest
 
     @Test
     void updateUserInfo()
-        throws XWikiException, QueryException, OIDCException, URISyntaxException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, URISyntaxException, MalformedURLException
     {
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         Address address = new Address();
@@ -276,7 +317,7 @@ class OIDCUserManagerTest
         userClassDocument.getXClass().apply(userClass, true);
         this.oldcore.getSpyXWiki().saveDocument(userClassDocument, this.oldcore.getXWikiContext());
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertEquals("xwiki:XWiki.issuer-preferredUserName", principal.getName());
 
@@ -309,11 +350,9 @@ class OIDCUserManagerTest
 
     @Test
     void updateUserInfoWithGroupSyncWithDefaultGroupsClaim()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USERINFOCLAIMS,
@@ -322,7 +361,7 @@ class OIDCUserManagerTest
 
         userInfo.setClaim(OIDCClientConfiguration.DEFAULT_GROUPSCLAIM, Arrays.asList("pgroup1", "pgroup2"));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertEquals("xwiki:XWiki.issuer-subject", principal.getName());
 
@@ -349,16 +388,14 @@ class OIDCUserManagerTest
 
     @Test
     void updateUserInfoWithGroupSyncWithoutMapping()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM, "groupclaim");
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USERINFOCLAIMS,
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup2"));
@@ -375,7 +412,7 @@ class OIDCUserManagerTest
         assertTrue(groupContains(this.existinggroupReference, userFullName));
         assertTrue(groupContains(this.xwikiallgroupReference, userFullName));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertEquals("xwiki:XWiki.issuer-subject", principal.getName());
 
@@ -404,7 +441,7 @@ class OIDCUserManagerTest
     
     @Test
     void updateUserInfoWithGroupSyncWithoutMappingAndIncludeRegex()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM, "groupclaim");
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_MAPPING_INCLUDE,
@@ -413,9 +450,7 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup2"));
@@ -432,7 +467,7 @@ class OIDCUserManagerTest
         assertTrue(groupContains(this.existinggroupReference, userFullName));
         assertTrue(groupContains(this.xwikiallgroupReference, userFullName));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertEquals("xwiki:XWiki.issuer-subject", principal.getName());
 
@@ -464,7 +499,7 @@ class OIDCUserManagerTest
 
     @Test
     void updateUserInfoWithGroupSyncWithoutMappingAndExcludeRegex()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM, "groupclaim");
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_MAPPING_EXCLUDE,
@@ -473,9 +508,7 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup2"));
@@ -492,7 +525,7 @@ class OIDCUserManagerTest
         assertTrue(groupContains(this.existinggroupReference, userFullName));
         assertTrue(groupContains(this.xwikiallgroupReference, userFullName));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertEquals("xwiki:XWiki.issuer-subject", principal.getName());
 
@@ -524,7 +557,7 @@ class OIDCUserManagerTest
 
     @Test
     void updateUserInfoWithGroupSyncWithoutMappingAndIncludeExcludeRegex()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM, "groupclaim");
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_MAPPING_INCLUDE,
@@ -534,9 +567,7 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup2"));
@@ -553,7 +584,7 @@ class OIDCUserManagerTest
         assertTrue(groupContains(this.existinggroupReference, userFullName));
         assertTrue(groupContains(this.xwikiallgroupReference, userFullName));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertEquals("xwiki:XWiki.issuer-subject", principal.getName());
 
@@ -585,7 +616,7 @@ class OIDCUserManagerTest
 
     @Test
     void updateUserInfoWithGroupSyncWithExplicitMappingIgnoresRegex()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_MAPPING,
             Arrays.asList("group1=pgroup1", "group1=pgroup2", "XWiki.group2=pgroup2", "existinggroup=othergroup"));
@@ -597,9 +628,7 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup2"));
@@ -614,7 +643,7 @@ class OIDCUserManagerTest
         assertFalse(groupContains(this.group2Reference, userFullName));
         assertTrue(groupContains(this.existinggroupReference, userFullName));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertEquals("xwiki:XWiki.issuer-subject", principal.getName());
 
@@ -642,7 +671,7 @@ class OIDCUserManagerTest
 
     @Test
     void updateUserInfoWithGroupSyncWithMapping()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_MAPPING,
             Arrays.asList("group1=pgroup1", "group1=pgroup2", "XWiki.group2=pgroup2", "existinggroup=othergroup"));
@@ -651,9 +680,7 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup2"));
@@ -668,7 +695,7 @@ class OIDCUserManagerTest
         assertFalse(groupContains(this.group2Reference, userFullName));
         assertTrue(groupContains(this.existinggroupReference, userFullName));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertEquals("xwiki:XWiki.issuer-subject", principal.getName());
 
@@ -696,16 +723,18 @@ class OIDCUserManagerTest
 
     @Test
     void updateUserInfoWithCustomNameAndIdPattern()
-        throws XWikiException, QueryException, OIDCException, URISyntaxException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, URISyntaxException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USER_NAMEFORMATER,
             "custom-${oidc.user.mail}-${oidc.user.mail.upperCase}-${oidc.user.mail.clean.upperCase}");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USER_NAMEFORBIDDENPATTERN, "@");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USER_NAMEFORBIDDENREPLACEMENT, "_AT_");
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USER_SUBJECTFORMATER,
             "custom-${oidc.user.mail}-${oidc.user.mail.upperCase}-${oidc.user.mail.clean.upperCase}");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USER_SUBJECTFORBIDDENPATTERN, "com");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USER_SUBJECTFORBIDDENREPLACEMENT, "MOC");
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         Address address = new Address();
@@ -720,13 +749,13 @@ class OIDCUserManagerTest
         userInfo.setZoneinfo("timezone");
         userInfo.setWebsite(new URI("http://website"));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
-        assertEquals("xwiki:XWiki.custom-mail@domain\\.com-MAIL@DOMAIN\\.COM-MAILDOMAINCOM", principal.getName());
+        assertEquals("xwiki:XWiki.custom-mail@domain\\.com-MAIL@DOMAIN\\.COM-MAIL_AT_DOMAIN\\.COM", principal.getName());
 
         XWikiDocument userDocument =
             this.oldcore.getSpyXWiki().getDocument(new DocumentReference(this.oldcore.getXWikiContext().getWikiId(),
-                "XWiki", "custom-mail@domain.com-MAIL@DOMAIN.COM-MAILDOMAINCOM"), this.oldcore.getXWikiContext());
+                "XWiki", "custom-mail@domain.com-MAIL@DOMAIN.COM-MAIL_AT_DOMAIN.COM"), this.oldcore.getXWikiContext());
 
         assertFalse(userDocument.isNew());
 
@@ -744,12 +773,12 @@ class OIDCUserManagerTest
 
         assertNotNull(oidcObject);
         assertEquals("http://issuer", oidcObject.getIssuer());
-        assertEquals("custom-mail@domain.com-MAIL@DOMAIN.COM-MAILDOMAINCOM", oidcObject.getSubject());
+        assertEquals("custom-mail@domain.com-MAIL@DOMAIN.COM-MAIL@DOMAIN.MOC", oidcObject.getSubject());
     }
 
     @Test
     void updateUserWithCustomNameFromIdToken()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_USER_NAMEFORMATER,
             "custom-${oidc.idtoken.employeeName}");
@@ -758,9 +787,11 @@ class OIDCUserManagerTest
         Subject subject = new Subject("subject");
         IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         idToken.setClaim("employeeName", "Azul");
+        this.configuration.setIdToken(idToken);
         UserInfo userInfo = new UserInfo(subject);
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
+        assertNotNull(principal);
 
         XWikiDocument userDocument = this.oldcore.getSpyXWiki().getDocument(
             new DocumentReference(this.oldcore.getXWikiContext().getWikiId(), "XWiki", "custom-Azul"),
@@ -770,7 +801,7 @@ class OIDCUserManagerTest
     }
 
     @Test
-    void updateUserInfoWithAllowedGroup() throws XWikiException, QueryException, OIDCException, MalformedURLException
+    void updateUserInfoWithAllowedGroup() throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_ALLOWED,
             Arrays.asList("pgroup1", "pgroup2"));
@@ -779,14 +810,12 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup3"));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertNotNull(principal);
     }
@@ -801,14 +830,12 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup2", "pgroup3"));
 
-        assertThrows(OIDCException.class, () -> this.manager.updateUser(idToken, userInfo, new BearerAccessToken()));
+        assertThrows(OIDCProviderException.class, () -> this.manager.updateUser(userInfo));
     }
 
     @Test
@@ -821,19 +848,17 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup3"));
 
-        assertThrows(OIDCException.class, () -> this.manager.updateUser(idToken, userInfo, new BearerAccessToken()));
+        assertThrows(OIDCProviderException.class, () -> this.manager.updateUser(userInfo));
     }
 
     @Test
     void updateUserInfoWithNotForbiddenGroup()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_FORBIDDEN,
             Arrays.asList("pgroup1"));
@@ -842,21 +867,19 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
 
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup2", "pgroup3"));
 
-        Principal principal = this.manager.updateUser(idToken, userInfo, new BearerAccessToken());
+        Principal principal = this.manager.updateUser(userInfo);
 
         assertNotNull(principal);
     }
 
     @Test
     void updateUserInfoWithAllowedAndForbiddenGroup()
-        throws XWikiException, QueryException, OIDCException, MalformedURLException
+        throws XWikiException, QueryException, OIDCProviderException, MalformedURLException
     {
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_ALLOWED,
             Arrays.asList("pgroup1", "pgroup2"));
@@ -866,32 +889,192 @@ class OIDCUserManagerTest
             ListUtils.sum(OIDCClientConfiguration.DEFAULT_USERINFOCLAIMS, Arrays.asList(
                 this.oldcore.getConfigurationSource().<String>getProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM))));
 
-        Issuer issuer = new Issuer("http://issuer");
         Subject subject = new Subject("subject");
-        IDTokenClaimsSet idToken = createIDTokenClaimsSet(issuer, subject);
         UserInfo userInfo = new UserInfo(subject);
-        BearerAccessToken accessToken = new BearerAccessToken();
 
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM, "groupclaim");
         userInfo.setClaim("groupclaim", Arrays.asList("pgroup1", "pgroup3"));
 
-        assertNotNull(this.manager.updateUser(idToken, userInfo, accessToken));
+        assertNotNull(this.manager.updateUser(userInfo));
 
         userInfo.setClaim("groupclaim", Arrays.asList("otherpgroup1", "otherpgroup3"));
 
-        assertThrows(OIDCException.class, () -> this.manager.updateUser(idToken, userInfo, accessToken),
+        assertThrows(OIDCProviderException.class, () -> this.manager.updateUser(userInfo),
             "The user is not allowed to authenticate because it's not a member of the following groups: [pgroup1, pgroup2]");
 
         this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_GROUPS_CLAIM,
             "custom.customgroupclaim");
         userInfo.setClaim("custom", Collections.singletonMap("customgroupclaim", Arrays.asList("pgroup1", "pgroup3")));
 
-        assertNotNull(this.manager.updateUser(idToken, userInfo, accessToken));
+        assertNotNull(this.manager.updateUser(userInfo));
 
         userInfo.setClaim("custom",
             Collections.singletonMap("customgroupclaim", Arrays.asList("otherpgroup1", "otherpgroup3")));
 
-        assertThrows(OIDCException.class, () -> this.manager.updateUser(idToken, userInfo, accessToken),
+        assertThrows(OIDCProviderException.class, () -> this.manager.updateUser(userInfo),
             "The user is not allowed to authenticate because it's not a member of the following groups: [pgroup1, pgroup2]");
+    }
+
+    // FIXME it would be nice to test updateUserInfoAsync, especially the fact that the execution happens
+    // outside the http request, clearing the session from this.configuration when the code actually runs in
+    // XWiki.
+
+    @Test
+    void getUserInfoRefreshesExpiredTokenValue() throws Exception
+    {
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_CLIENTID, "myclientid");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_PROVIDER, "http://localhost:8081/");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_ENDPOINT_USERINFO, "http://localhost:8081/userinfo");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_SECRET, "mysecret");
+
+        this.configuration.setAccessToken(new BearerAccessToken("expiredaccesstoken", 0, this.configuration.getScope()), new RefreshToken("validrefreshtoken"));
+        HttpServer server = startServer();
+        try {
+            this.manager.getUserInfo();
+            assertEquals("refreshedaccesstoken", this.configuration.getAccessToken().getValue());
+            assertEquals("refreshedvalidrefreshtoken", this.configuration.getRefreshToken().getValue());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void getUserInfoDoesNotRefreshNonExpiredToken() throws Exception
+    {
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_CLIENTID, "myclientid");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_PROVIDER, "http://localhost:8081/");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_ENDPOINT_USERINFO, "http://localhost:8081/userinfo");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_SECRET, "mysecret");
+
+        this.configuration.setAccessToken(new BearerAccessToken("validaccesstoken", 0, this.configuration.getScope()), new RefreshToken("validrefreshtoken"));
+        HttpServer server = startServer();
+        try {
+            this.manager.getUserInfo();
+            assertEquals("validaccesstoken", this.configuration.getAccessToken().getValue());
+            assertEquals("validrefreshtoken", this.configuration.getRefreshToken().getValue());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+
+    @Test
+    void getUserInfoRefreshesExpiredTokenExpiredLifetime() throws Exception
+    {
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_CLIENTID, "myclientid");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_PROVIDER, "http://localhost:8081/");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_ENDPOINT_USERINFO, "http://localhost:8081/userinfo");
+        this.oldcore.getConfigurationSource().setProperty(OIDCClientConfiguration.PROP_SECRET, "mysecret");
+
+        this.configuration.setAccessToken(new BearerAccessToken("validaccesstoken", 1, this.configuration.getScope()), new RefreshToken("validrefreshtoken"));
+        HttpServer server = startServer();
+        try {
+            Thread.sleep(1100);
+            this.manager.getUserInfo();
+            assertEquals("refreshedaccesstoken", this.configuration.getAccessToken().getValue());
+            assertEquals("refreshedvalidrefreshtoken", this.configuration.getRefreshToken().getValue());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private HttpServer startServer() throws IOException
+    {
+        HttpServer httpServer = HttpServer.create(new InetSocketAddress(8081), 0); // or use InetSocketAddress(0) for ephemeral port
+        httpServer.createContext("/.well-known/openid-configuration", exchange -> {
+            JSONObject r = new JSONObject();
+            r.put("issuer", "http://localhost:8081/");
+            r.put("authorization_endpoint", "http://localhost:8081/auth");
+            r.put("token_endpoint", "http://localhost:8081/token");
+            r.put("jwks_uri", "http://localhost:8081/jwks");
+            r.put("response_types_supported", new JSONArray(List.of("code", "token", "id_token")));
+            r.put("subject_types_supported", new JSONArray(List.of("public")));
+            r.put("id_token_signing_alg_values_supported", new JSONArray(List.of("RS256")));
+            r.put("claims_supported", new JSONArray(List.of("sub", "iss", "aud", "iat", "exp", "email", "name")));
+            sendResponse(exchange, r, HttpURLConnection.HTTP_OK);
+        });
+
+        httpServer.createContext("/userinfo", exchange -> {
+            String authorization = exchange.getRequestHeaders().getFirst("Authorization");
+            String accessToken = "expiredaccesstoken";
+            if (authorization.startsWith("Bearer ")) {
+                accessToken = authorization.substring(7);
+            }
+            JSONObject r = new JSONObject();
+            int httpCode = HttpURLConnection.HTTP_OK;
+            if ("expiredaccesstoken".equals(accessToken)) {
+                httpCode = handleInvalidToken(r);
+            } else {
+                r.put("sub", "1234567890");
+                r.put("name", "John Doe");
+            }
+            sendResponse(exchange, r, httpCode);
+        });
+
+        httpServer.createContext("/token", exchange -> {
+            int httpCode = HttpURLConnection.HTTP_OK;
+            JSONObject r = new JSONObject();
+            boolean authorized = false;
+            String authorization = exchange.getRequestHeaders().getFirst("Authorization");
+            if (authorization.startsWith("Basic ")) {
+                String[] decoded = new String(Base64.getDecoder().decode(authorization.substring(6))).split(":");
+                authorized = decoded[0].equals("myclientid") && decoded[1].equals("mysecret");
+            }
+            if (authorized) {
+                Map<String, String> p = parseURLEncodedBody(exchange);
+                String refreshToken = "refreshed" + p.get("refresh_token");
+                r.put("access_token", "refreshedaccesstoken");
+                r.put("refresh_token", refreshToken);
+                r.put("token_type", "Bearer");
+                r.put("expires_in", 3600);
+            } else {
+                httpCode = handleInvalidToken(r);
+            }
+            sendResponse(exchange, r, httpCode);
+        });
+
+        httpServer.start();
+        return httpServer;
+    }
+
+    private static void sendResponse(HttpExchange exchange, JSONObject r, int httpCode) throws IOException
+    {
+        byte[] response = r.toString().getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().add("Content-Type", "application/json");
+        exchange.sendResponseHeaders(httpCode, response.length);
+        exchange.getResponseBody().write(response);
+        exchange.close();
+    }
+
+    private static int handleInvalidToken(JSONObject r)
+    {
+        int httpCode;
+        httpCode = HttpURLConnection.HTTP_UNAUTHORIZED;
+        r.put("error", BearerTokenError.INVALID_TOKEN.getCode());
+        r.put("reason", "This token is invalid");
+        return httpCode;
+    }
+
+    private Map<String, String> parseURLEncodedParameters(String s)
+    {
+        String[] split = s.split("&");
+        Map<String, String> m = new HashMap<>(split.length);
+        for (String pair : split) {
+            String[] v = pair.split("=");
+            if (v.length == 2) {
+                m.put(v[0], v[1]);
+            }
+        }
+        return m;
+    }
+
+    private Map<String, String> parseURLEncodedBody(HttpExchange exchange)
+    {
+        String body = new BufferedReader(
+            new InputStreamReader(exchange.getRequestBody(), StandardCharsets.UTF_8))
+                             .lines()
+                             .collect(Collectors.joining("\n"));
+
+        return parseURLEncodedParameters(body);
     }
 }

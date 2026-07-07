@@ -31,11 +31,13 @@ import javax.script.ScriptContext;
 
 import org.slf4j.Logger;
 import org.xwiki.component.annotation.Component;
+import org.xwiki.contrib.oidc.consent.internal.store.BaseObjectOIDCConsent;
+import org.xwiki.contrib.oidc.consent.internal.store.OIDCConsentStore;
 import org.xwiki.contrib.oidc.provider.internal.OIDCManager;
 import org.xwiki.contrib.oidc.provider.internal.OIDCResourceReference;
 import org.xwiki.contrib.oidc.provider.internal.session.ProviderOIDCSessions;
-import org.xwiki.contrib.oidc.provider.internal.store.BaseObjectOIDCConsent;
-import org.xwiki.contrib.oidc.provider.internal.store.OIDCStore;
+import org.xwiki.contrib.oidc.provider.internal.store.BaseObjectOIDCClient;
+import org.xwiki.contrib.oidc.provider.internal.store.OIDCProviderStore;
 import org.xwiki.csrf.CSRFToken;
 import org.xwiki.script.ScriptContextManager;
 
@@ -44,6 +46,7 @@ import com.nimbusds.oauth2.sdk.AuthorizationRequest;
 import com.nimbusds.oauth2.sdk.AuthorizationSuccessResponse;
 import com.nimbusds.oauth2.sdk.OAuth2Error;
 import com.nimbusds.oauth2.sdk.Response;
+import com.nimbusds.oauth2.sdk.auth.verifier.InvalidClientException;
 import com.nimbusds.oauth2.sdk.http.HTTPRequest;
 import com.nimbusds.oauth2.sdk.id.ClientID;
 import com.nimbusds.openid.connect.sdk.AuthenticationErrorResponse;
@@ -56,6 +59,7 @@ import com.nimbusds.openid.connect.sdk.OIDCScopeValue;
 import com.nimbusds.openid.connect.sdk.Prompt;
 import com.nimbusds.openid.connect.sdk.claims.IDTokenClaimsSet;
 import com.xpn.xwiki.XWikiContext;
+import com.xpn.xwiki.XWikiException;
 import com.xpn.xwiki.user.api.XWikiUser;
 
 /**
@@ -77,7 +81,10 @@ public class AuthorizationOIDCEndpoint implements OIDCEndpoint
     private Provider<XWikiContext> xcontextProvider;
 
     @Inject
-    private OIDCStore oidcStore;
+    private OIDCProviderStore providerStore;
+
+    @Inject
+    private OIDCConsentStore consentStore;
 
     @Inject
     private OIDCManager manager;
@@ -110,6 +117,10 @@ public class AuthorizationOIDCEndpoint implements OIDCEndpoint
         } else {
             this.logger.debug("OIDC: Not OpenID Connect client, assuming OAuth2");
         }
+
+        // Verify the redirect URI before doing anything else since we don't want to do any work if the client is not
+        // valid or if the redirect URI is not valid for the client.
+        checkRedirectURI(request.getClientID(), request.getRedirectionURI().toString());
 
         XWikiContext xcontext = this.xcontextProvider.get();
 
@@ -152,7 +163,7 @@ public class AuthorizationOIDCEndpoint implements OIDCEndpoint
 
         // Get current consent for provided client id
         BaseObjectOIDCConsent consent =
-            this.oidcStore.getConsent(clientID, request.getRedirectionURI(), xcontext.getUserReference());
+            this.consentStore.getConsent(clientID, request.getRedirectionURI(), xcontext.getUserReference());
 
         this.logger.debug("OIDC: Existing consent: [{}]", consent);
 
@@ -181,7 +192,7 @@ public class AuthorizationOIDCEndpoint implements OIDCEndpoint
             }
 
             // Create new consent
-            consent = this.oidcStore.createCurrentUserConsent();
+            consent = this.consentStore.createCurrentUserConsent();
 
             consent.setClientID(clientID);
             consent.setRedirectURI(request.getRedirectionURI());
@@ -193,18 +204,18 @@ public class AuthorizationOIDCEndpoint implements OIDCEndpoint
 
             // Set access token if needed
             if (request.getResponseType().impliesImplicitFlow()) {
-                this.oidcStore.createAccessToken(consent);
+                this.consentStore.createAccessToken(consent);
             }
 
             // Save consent
-            this.oidcStore.saveConsent(consent, "Add new OIDC consent");
+            this.consentStore.saveConsent(consent, "Add new OIDC consent");
 
             this.logger.debug("OIDC: New consent: [{}]", consent);
         } else if (request.getResponseType().impliesImplicitFlow()) {
             // We have to set a new token in case of implicit flow since we don't know the clear version of the stored
             // one
-            this.oidcStore.createAccessToken(consent);
-            this.oidcStore.saveConsent(consent, "Update token");
+            this.consentStore.createAccessToken(consent);
+            this.consentStore.saveConsent(consent, "Update token");
         }
 
         Nonce nonce = request instanceof AuthenticationRequest ? ((AuthenticationRequest) request).getNonce() : null;
@@ -222,10 +233,10 @@ public class AuthorizationOIDCEndpoint implements OIDCEndpoint
         }
 
         // Remember authorization code
-        this.oidcStore.setAuthorizationCode(authorizationCode, consent.getDocumentReference(), nonce);
+        this.providerStore.setAuthorizationCode(authorizationCode, consent.getDocumentReference(), nonce);
 
         // Remember the user
-        this.sessions.addSession(this.oidcStore.getSubject(consent.getUserReference()), clientID);
+        this.sessions.addSession(this.providerStore.getSubject(consent.getUserReference()), clientID);
 
         // Create response
         if (request.getResponseType().impliesCodeFlow()) {
@@ -256,8 +267,8 @@ public class AuthorizationOIDCEndpoint implements OIDCEndpoint
     {
         if (request instanceof AuthenticationRequest) {
             // OpenID Connect
-            if (((AuthenticationRequest) request).getPrompt() != null) {
-                return ((AuthenticationRequest) request).getPrompt().contains(type);
+            if (request.getPrompt() != null) {
+                return request.getPrompt().contains(type);
             }
         } else {
             // OAuth2
@@ -302,5 +313,20 @@ public class AuthorizationOIDCEndpoint implements OIDCEndpoint
         this.scripts.getScriptContext().setAttribute("oidc", oidc, ScriptContext.ENGINE_SCOPE);
 
         return this.manager.executeTemplate("oidc/provider/consent.vm");
+    }
+
+    private ClientID checkRedirectURI(ClientID clientID, String redirectURI)
+        throws InvalidClientException, XWikiException
+    {
+        // Get the corresponding registered client metadata
+        BaseObjectOIDCClient storedClient = this.providerStore.getClient(clientID);
+        if (storedClient == null) {
+            throw InvalidClientException.BAD_ID;
+        }
+
+        // Verify the redirect URI if needed
+        storedClient.checkRedirectURI(redirectURI);
+
+        return clientID;
     }
 }

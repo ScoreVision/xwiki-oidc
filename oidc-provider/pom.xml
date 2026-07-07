@@ -25,7 +25,7 @@
   <parent>
     <groupId>org.xwiki.contrib.oidc</groupId>
     <artifactId>oidc</artifactId>
-    <version>2.20.3</version>
+    <version>2.24.1-SNAPSHOT</version>
   </parent>
 
   <artifactId>oidc-provider</artifactId>
@@ -75,11 +75,6 @@
       <version>${platform.version}</version>
     </dependency>
     <dependency>
-      <groupId>org.xwiki.contrib</groupId>
-      <artifactId>authservice-backport-api</artifactId>
-      <version>1.1.1</version>
-    </dependency>
-    <dependency>
       <groupId>org.xwiki.platform</groupId>
       <artifactId>xwiki-platform-uiextension-api</artifactId>
       <version>${platform.version}</version>
@@ -99,6 +94,22 @@
       <artifactId>xwiki-platform-rendering-macro-code</artifactId>
       <version>${platform.version}</version>
     </dependency>
+    <dependency>
+      <groupId>org.xwiki.contrib.oidc</groupId>
+      <artifactId>oidc-consent</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!--
+		Not really needed by the provider, but added for retro compatibility reasons
+        (to not loose it and break authentication when upgrading for an old version of
+        the provider which used to include the token authenticator).
+    -->
+    <dependency>
+      <groupId>org.xwiki.contrib.oidc</groupId>
+      <artifactId>token-authenticator</artifactId>
+      <version>${project.version}</version>
+    </dependency>
   </dependencies>
 
   <build>
@@ -109,15 +120,12 @@
         <artifactId>maven-checkstyle-plugin</artifactId>
         <configuration>
           <excludes>
-              org/xwiki/contrib/oidc/provider/internal/OIDCConfiguration.java,
-              org/xwiki/contrib/oidc/provider/internal/store/OIDCConsent.java,
-              org/xwiki/contrib/oidc/provider/internal/store/OIDCStore.java,
+              org/xwiki/contrib/oidc/provider/internal/store/OIDCProviderStore.java,
               org/xwiki/contrib/oidc/provider/internal/OIDCManager.java,
               org/xwiki/contrib/oidc/provider/internal/OIDCResourceReferenceHandler.java,
-              org/xwiki/contrib/oidc/provider/internal/util/OIDCServletUtils.java,
-              org/xwiki/contrib/oidc/provider/internal/endpoint/AuthorizationOIDCEndpoint.java,
               org/xwiki/contrib/oidc/provider/internal/endpoint/UserInfoOIDCEndpoint.java,
-              org/xwiki/contrib/oidc/provider/internal/util/StoreUtils.java
+              org/xwiki/contrib/oidc/provider/internal/endpoint/TokenOIDCEndpoint.java,
+              org/xwiki/contrib/oidc/provider/internal/endpoint/AuthorizationOIDCEndpoint.java
           </excludes>
         </configuration>
       </plugin>
